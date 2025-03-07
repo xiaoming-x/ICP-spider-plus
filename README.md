@@ -18,6 +18,7 @@ https://github.com/ravizhan/ICP-spider
 自动化查询指定公司名称的ICP备案信息（域名、APP、小程序）
 
 > 主要用于企业资产测绘
+>
 > 因时效性要求，需从工业和信息化部政务服务平台查询实时数据
 
 
@@ -39,7 +40,7 @@ https://github.com/ravizhan/ICP-spider
 pip install -r requirements.txt
 ```
 
-## 认证信息获取
+## API
 
 > 主要接口：https://hlwicpfwc.miit.gov.cn/icpproject_query/api/icpAbbreviateInfo/queryByCondition
 
