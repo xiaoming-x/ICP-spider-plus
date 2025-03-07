@@ -1,0 +1,7 @@
+requests>=2.28
+pandas>=1.5
+curl-cffi>=0.5.8
+cryptography>=38.0
+opencv-python>=4.6
+onnxruntime>=1.13
+numpy>=1.23
