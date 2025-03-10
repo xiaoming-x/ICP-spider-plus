@@ -138,14 +138,21 @@ class AuthManager:
                 self._get_auth_token()
 
     def update_headers(self):
-        """更新所有认证信息"""
-        try:
-            print("\n正在更新认证信息...")
-            self._reset_auth()  # 重新初始化认证信息
-            print("认证信息更新成功")
-        except Exception as e:
-            print(f"认证信息更新失败: {str(e)}")
-            raise
+        """更新认证信息（10次重试）"""
+        max_retries = 10
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"\n▶ 认证尝试 {attempt}/{max_retries}")
+                self._reset_auth()
+                print("✅ 认证成功")
+                return
+            except Exception as e:
+                print(f"❌ 失败原因: {str(e)}")
+                if attempt < max_retries:
+                    delay = random.randint(5, 10)
+                    print(f"⏳ {delay}秒后重试...")
+                    time.sleep(delay)
+        raise RuntimeError("❗ 无法完成认证，请检查：\n1. 网络连接\n2. 验证码识别服务\n3. 目标网站状态")
 
     @property
     def headers(self):
