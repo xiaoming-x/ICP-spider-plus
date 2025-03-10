@@ -73,7 +73,6 @@ def main():
                         if response.status_code == 403:
                             if not current_proxy:
                                 print("\n⚠️ 访问被拒绝（403），可能触发防护机制")
-                                write_to_excel(all_results, args.output)
                                 sys.exit(1)
                             else:
                                 print(f"代理 {current_proxy} 返回403，继续尝试其他代理...")
@@ -85,7 +84,6 @@ def main():
                                     continue
                                 else:
                                     print("所有代理均已失效，正在保存数据并退出...")
-                                    write_to_excel(all_results, args.output)
                                     sys.exit(1)
 
                         # 处理响应数据
@@ -121,11 +119,9 @@ def main():
                                 continue
                             else:
                                 print("所有代理均已失效，正在保存数据并退出...")
-                                write_to_excel(all_results, args.output)
                                 sys.exit(1)
                         else:
                             print("未使用代理，请求失败，正在保存数据并退出...")
-                            write_to_excel(all_results, args.output)
                             sys.exit(1)
 
                 if not success:
