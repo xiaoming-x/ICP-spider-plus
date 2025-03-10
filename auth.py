@@ -13,13 +13,17 @@ from captcha import Crack
 class AuthManager:
     def __init__(self):
         self.crack = Crack()
+        self._reset_auth()  # 初始化认证信息
+
+    def _reset_auth(self):
+        """重置所有认证信息"""
         self.token = None
         self.sign = None
         self.uuid_token = None
         self.cookie = None
-        self._get_auth_token()
-        self._process_captcha()
-        self._generate_cookie()
+        self._get_auth_token()     # 获取Token
+        self._process_captcha()    # 处理验证码
+        self._generate_cookie()    # 生成Cookie
 
     def _generate_cookie(self):
         self.cookie = f"__jsluid_s={uuid.uuid4().hex[:32]}"
@@ -132,6 +136,16 @@ class AuthManager:
                     raise RuntimeError("验证码处理失败")
                 time.sleep(2 if retry == 0 else 5)
                 self._get_auth_token()
+
+    def update_headers(self):
+        """更新所有认证信息"""
+        try:
+            print("\n正在更新认证信息...")
+            self._reset_auth()  # 重新初始化认证信息
+            print("认证信息更新成功")
+        except Exception as e:
+            print(f"认证信息更新失败: {str(e)}")
+            raise
 
     @property
     def headers(self):
