@@ -49,7 +49,7 @@ pip install -r requirements.txt
 1. **运行脚本**：
 
 ```bash
-   python ICP.py [-h] [-f FILE] [-o OUTPUT] [-t {web,app,miniapp,all}] [-p PROXY_ROTATE] [unit_name]
+   python main.py [-h] [-f FILE] [-o OUTPUT] [-t {web,app,miniapp,all}] [-p PROXY_ROTATE] [unit_name]
    ICP备案查询工具
 
 positional arguments:
@@ -69,7 +69,7 @@ options:
 2. **查询单公司**
 
    ```
-   python ICP.py xxxx有限公司 -t all
+   python main.py xxxx有限公司 -t all
    ```
 
    ![image-20250307095804070](README/image-20250307095804070.png)
@@ -77,7 +77,7 @@ options:
 3. **查询多个公司**
 
    ```
-   python ICP.py -f Company.txt -t all
+   python main.py -f Company.txt -t all
    ```
 
    ![image-20250307144602990](README/image-20250307144602990.png)
@@ -85,7 +85,7 @@ options:
 4. **查询多个公司(代理)**
 
    ```
-   python ICP.py -f Company.txt -t all -p 3
+   python main.py -f Company.txt -t all -p 3
    ```
 
    ![image-20250307153003647](README/image-20250307153003647.png)
