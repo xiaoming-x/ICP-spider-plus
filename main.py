@@ -98,6 +98,7 @@ def main():
                                 all_results[query_type].extend(process_response(response_data, service_type))
                                 success = True
                                 # 智能延时
+                                # 有足够代理的情况下批量查询时可以适当拉长延时random.uniform(0.5, 1.5)，避免代理被封完
                                 delay = random.uniform(3, 4) if not current_proxy else random.uniform(0.5, 1.5)
                                 time.sleep(delay)
                                 print(f"请求成功，随机延迟: {delay:.2f}秒")
