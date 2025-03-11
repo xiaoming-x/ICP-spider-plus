@@ -29,7 +29,7 @@ class AuthManager:
         self.cookie = f"__jsluid_s={uuid.uuid4().hex[:32]}"
 
     def _get_auth_token(self):
-        for retry in range(3):
+        for retry in range(10):
             try:
                 t = str(round(time.time()))
                 data = {
