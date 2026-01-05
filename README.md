@@ -73,15 +73,7 @@ options:
    python main.py xxxx有限公司 -t all
    ```
 
-   ![image-20250307095804070](README/image-20250307095804070.png)
-
-3. **查询多个公司**
-
-   ```
-   python main.py -f Company.txt -t all
-   ```
-
-   ![image-20250307144602990](README/image-20250307144602990.png)
+   ![image-20260105161509324](./README/image-20260105161509324.png)
 
 4. **查询多个公司(代理)**
 
@@ -89,16 +81,26 @@ options:
    python main.py -f Company.txt -t all -p 3
    ```
 
-   ![image-20250307153003647](README/image-20250307153003647.png)
+   ![image-20260105165954142](./README/image-20260105165954142.png)
 
 
 查询结果：
 
-![image-20250224165133597](./README/image-20250224165133597.png)
+web
 
-![image-20250224165144945](./README/image-20250224165144945.png)
+![image-20260105170038709](./README/image-20260105170038709.png)
 
-![image-20250224165202304](./README/image-20250224165202304.png)
+app
+
+![image-20260105170439240](./README/image-20260105170439240.png)
+
+miniapp
+
+![image-20260105170500382](./README/image-20260105170500382.png)
+
+quickapp
+
+![image-20260105170513630](./README/image-20260105170513630.png)
 
 ## 鸣谢
 

@@ -10,13 +10,12 @@ from utils import (
     generate_modern_headers, process_response, write_to_excel,
     load_proxies, validate_proxies, format_proxy, retry
 )
-from constants import QUERY_URL, TYPE_MAPPING, DEFAULT_TIMEOUT
+from constants import QUERY_URL, TYPE_MAPPING, DEFAULT_TIMEOUT, MAX_MAIN_QUERY_RETRIES
 
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    format="%(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -31,9 +30,15 @@ def main():
     args = parser.parse_args()
 
     auth_manager = AuthManager()
-    raw_proxies = load_proxies()
-    available_proxies = validate_proxies(raw_proxies)
-    use_proxy = len(available_proxies) > 0
+    # 只有指定了 -p 参数时才加载和使用代理
+    use_proxy = args.proxy_rotate is not None
+    available_proxies = []
+    if use_proxy:
+        raw_proxies = load_proxies()
+        available_proxies = validate_proxies(raw_proxies)
+        if len(available_proxies) == 0:
+            logger.warning("指定了代理轮换参数但未找到有效代理，将不使用代理")
+            use_proxy = False
     proxy_index = 0  # 代理索引，用于轮询
     requests_per_proxy = 0  # 当前代理已处理的请求数
     
@@ -50,14 +55,8 @@ def main():
             # 确定当前使用的代理
             current_proxy: Optional[str] = None
             if use_proxy and available_proxies:
-                # 检查是否需要轮换代理
-                if args.proxy_rotate and requests_per_proxy >= args.proxy_rotate:
-                    proxy_index = (proxy_index + 1) % len(available_proxies)
-                    requests_per_proxy = 0  # 重置计数
-                    logger.info(f"达到轮换间隔，切换到代理 #{proxy_index + 1}")
-                
                 current_proxy = available_proxies[proxy_index]
-                logger.info(f"当前使用代理：{current_proxy} (已处理 {requests_per_proxy}/{args.proxy_rotate or '无限'} 个请求)")
+                logger.info(f"当前使用代理：{current_proxy} ")
 
             for query_type in query_types:
                 if blocked:
@@ -66,8 +65,19 @@ def main():
                 service_type = TYPE_MAPPING[query_type]
                 logger.info(f"正在查询 {query_type} 类型...")
                 success = False
+                retry_count = 0
+                tried_proxies = set()  # 记录已尝试的代理索引（用于避免无限循环）
+                tried_proxies = set()  # 记录已尝试的代理索引（用于避免无限循环）
 
                 while not success:
+                    # 使用代理时：在每次请求前检查是否需要轮换代理
+                    if use_proxy and available_proxies and args.proxy_rotate:
+                        if requests_per_proxy >= args.proxy_rotate:
+                            proxy_index = (proxy_index + 1) % len(available_proxies)
+                            requests_per_proxy = 0  # 重置计数
+                            current_proxy = available_proxies[proxy_index]
+                            logger.info(f"达到轮换间隔，切换到代理 #{proxy_index + 1}: {current_proxy}")
+                    
                     headers = generate_modern_headers(auth_manager.headers)
 
                     try:
@@ -78,10 +88,11 @@ def main():
                             json={"pageNum": "1", "pageSize": "100", "unitName": unit, "serviceType": service_type},
                             impersonate="chrome110",
                             proxies=format_proxy(current_proxy) if current_proxy else None,
-                            timeout=DEFAULT_TIMEOUT
+                            timeout=DEFAULT_TIMEOUT,
+                            verify=False  # 禁用SSL证书验证
                         )
                         
-                        # 增加当前代理的请求计数
+                        # 增加当前代理的请求计数（每次请求都计数，包括重试）
                         if current_proxy:
                             requests_per_proxy += 1
 
@@ -108,9 +119,28 @@ def main():
                                 continue
                             
                             if response_data.get("success"):
+                                # 创建引用列表，用于在process_response中更新计数
+                                requests_per_proxy_ref = [requests_per_proxy] if use_proxy else None
+                                proxy_index_ref = [proxy_index] if use_proxy else None
+                                
                                 all_results[query_type].extend(
-                                    process_response(response_data, service_type, headers)
+                                    process_response(
+                                        response_data, service_type, headers,
+                                        current_proxy=current_proxy if use_proxy else None,
+                                        available_proxies=available_proxies if use_proxy else None,
+                                        proxy_index_ref=proxy_index_ref,
+                                        proxy_rotate=args.proxy_rotate if use_proxy else None,
+                                        requests_per_proxy_ref=requests_per_proxy_ref
+                                    )
                                 )
+                                
+                                # 同步详情查询更新后的计数和代理索引
+                                if use_proxy and requests_per_proxy_ref:
+                                    requests_per_proxy = requests_per_proxy_ref[0]
+                                if use_proxy and proxy_index_ref:
+                                    proxy_index = proxy_index_ref[0]
+                                    current_proxy = available_proxies[proxy_index] if available_proxies else current_proxy
+                                
                                 success = True
                                 # 智能延时
                                 delay = random.uniform(3, 4) if not current_proxy else random.uniform(2, 3)
@@ -123,16 +153,58 @@ def main():
 
                     except Exception as e:
                         logger.error(f"请求失败：{str(e)}")
-                        if current_proxy and available_proxies:
-                            # 切换到下一个代理
-                            proxy_index = (proxy_index + 1) % len(available_proxies)
-                            current_proxy = available_proxies[proxy_index]
-                            requests_per_proxy = 0  # 重置计数
-                            logger.info(f"切换到新代理：{current_proxy}")
-                            continue
+                        # 增加当前代理的请求计数（失败也计数）
+                        if current_proxy:
+                            requests_per_proxy += 1
+                        
+                        # 增加重试计数（仅用于日志显示）
+                        retry_count += 1
+                        
+                        if use_proxy and available_proxies:
+                            # 使用代理时：不检查重试次数限制，只要还有代理可用就继续尝试
+                            # 检查是否达到使用次数限制
+                            if args.proxy_rotate and requests_per_proxy >= args.proxy_rotate:
+                                # 达到限制，切换到下一个代理
+                                if len(available_proxies) > 1:
+                                    # 记录当前代理已尝试过
+                                    tried_proxies.add(proxy_index)
+                                    
+                                    # 切换到下一个代理
+                                    proxy_index = (proxy_index + 1) % len(available_proxies)
+                                    current_proxy = available_proxies[proxy_index]
+                                    requests_per_proxy = 0  # 重置计数
+                                    logger.info(f"代理使用次数已达上限，切换到新代理：{current_proxy}")
+                                    
+                                    # 如果所有代理都尝试过一遍，重置记录（允许再次轮换）
+                                    if len(tried_proxies) >= len(available_proxies):
+                                        tried_proxies.clear()
+                                    
+                                    delay = random.uniform(1, 2)
+                                    logger.info(f"正在重试（第{retry_count}次），{delay:.1f}秒后重试...")
+                                    time.sleep(delay)
+                                    continue
+                                else:
+                                    # 只有一个代理，无法切换，但继续重试（不限制次数）
+                                    delay = random.uniform(1, 2)
+                                    logger.info(f"正在重试（第{retry_count}次），{delay:.1f}秒后重试...")
+                                    time.sleep(delay)
+                                    continue
+                            else:
+                                # 未达到限制，使用当前代理重试（不限制次数）
+                                delay = random.uniform(1, 2)
+                                logger.info(f"正在重试（第{retry_count}次，当前代理已使用{requests_per_proxy}/{args.proxy_rotate or '无限'}次），{delay:.1f}秒后重试...")
+                                time.sleep(delay)
+                                continue
                         else:
-                            logger.error("无可用代理，退出程序")
-                            sys.exit(1)
+                            # 未使用代理时：重试当前请求
+                            if retry_count < MAX_MAIN_QUERY_RETRIES:
+                                delay = random.uniform(2, 4)
+                                logger.info(f"正在重试（第{retry_count}/{MAX_MAIN_QUERY_RETRIES}次），{delay:.1f}秒后重试...")
+                                time.sleep(delay)
+                                continue
+                            else:
+                                logger.warning(f"{query_type} 类型查询失败（已重试{MAX_MAIN_QUERY_RETRIES}次），跳过该类型")
+                                break  # 跳出while循环，继续下一个查询类型
 
                 if not success:
                     logger.warning(f"{query_type} 类型查询失败")

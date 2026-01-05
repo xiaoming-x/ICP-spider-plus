@@ -18,6 +18,9 @@ SIAMESE_MODEL_PATH = "./onnx/siamese.onnx"
 MAX_AUTH_RETRIES = 3
 MAX_REQUEST_RETRIES = 3
 MAX_TOKEN_RETRIES = 10
+MAX_CAPTCHA_RETRIES = 5  # 验证码识别失败时的最大重试次数（每次重新获取验证码）
+MAX_DETAIL_QUERY_RETRIES = 3  # 详情查询失败时的最大重试次数
+MAX_MAIN_QUERY_RETRIES = 3  # 主查询失败时的最大重试次数（未使用代理时）
 
 # 请求配置
 DEFAULT_TIMEOUT = 10
