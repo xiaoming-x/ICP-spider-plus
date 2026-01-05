@@ -32,7 +32,8 @@ https://github.com/ravizhan/ICP-spider
 
 ## 依赖
 
-- Python 3.x
+- Python 3.10/3.11
+- 换环境后python 3.14出现了No matching distribution found for onnxruntime的问题
 
 通过以下命令安装所需的库：
 
@@ -49,7 +50,7 @@ pip install -r requirements.txt
 1. **运行脚本**：
 
 ```bash
-   python main.py [-h] [-f FILE] [-o OUTPUT] [-t {web,app,miniapp,all}] [-p PROXY_ROTATE] [unit_name]
+   python main.py [-h] [-f FILE] [-o OUTPUT] [-t {web,app,miniapp,quickapp,all}] [-p PROXY_ROTATE] [unit_name]
    ICP备案查询工具
 
 positional arguments:
@@ -57,13 +58,13 @@ positional arguments:
 
 options:
   -h, --help            show this help message and exit
-  -f FILE, --file FILE  从文件读取单位名称列表
+  -f FILE, --file FILE  批量查询文件
   -o OUTPUT, --output OUTPUT
                         输出文件名
-  -t {web,app,miniapp,all}, --type {web,app,miniapp,all}
-                        查询类型（域名、APP、小程序、全部）
+  -t {web,app,miniapp,quickapp,all}, --type {web,app,miniapp,quickapp,all}
+                        查询类型:网站、APP、小程序、快应用、全部
   -p PROXY_ROTATE, --proxy_rotate PROXY_ROTATE
-                        启用代理且每N个请求更换代理
+                        代理轮换间隔（每个代理处理N个请求后切换）
 ```
 
 2. **查询单公司**
