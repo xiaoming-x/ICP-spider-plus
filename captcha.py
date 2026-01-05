@@ -2,23 +2,45 @@ import base64
 import cv2
 import numpy as np
 import onnxruntime
+from typing import List, Optional, Tuple
+from constants import YOLO_MODEL_PATH, SIAMESE_MODEL_PATH
 
 
 class Crack:
     def __init__(self):
+        """初始化验证码破解器，预加载YOLO和Siamese模型"""
         self.big_img = None
+        # 初始化时加载模型（仅加载一次）
+        self.yolo_session = onnxruntime.InferenceSession(YOLO_MODEL_PATH)
+        self.siamese_session = onnxruntime.InferenceSession(SIAMESE_MODEL_PATH)
 
-    def read_base64_image(self, base64_string):
-        """将Base64字符串解码为OpenCV图像"""
+    def read_base64_image(self, base64_string: str) -> np.ndarray:
+        """
+        将Base64字符串解码为OpenCV图像
+        
+        Args:
+            base64_string: 图像的Base64编码字符串
+            
+        Returns:
+            解码后的OpenCV图像（BGR格式）
+        """
         img_data = base64.b64decode(base64_string)
         np_array = np.frombuffer(img_data, np.uint8)
         return cv2.imdecode(np_array, cv2.IMREAD_COLOR)
 
-    def detect(self, big_img):
-        """使用YOLO模型检测验证码中的文字位置"""
+    def detect(self, big_img: str) -> Optional[List[List[int]]]:
+        """
+        使用YOLO模型检测验证码中的文字位置
+        
+        Args:
+            big_img: 大图的Base64编码字符串
+            
+        Returns:
+            检测到的边界框列表，每个框为[left, top, width, height]；检测失败返回None
+        """
         confidence_thres = 0.7
         iou_thres = 0.7
-        session = onnxruntime.InferenceSession("./onnx/yolov8.onnx")
+        session = self.yolo_session
         model_inputs = session.get_inputs()
         self.big_img = self.read_base64_image(big_img)
         img_height, img_width = self.big_img.shape[:2]
@@ -34,6 +56,7 @@ class Crack:
         boxes, scores = [], []
         x_factor = img_width / 512
         y_factor = img_height / 192
+        
         for i in range(rows):
             classes_scores = outputs[i][4:]
             max_score = np.amax(classes_scores)
@@ -45,16 +68,27 @@ class Crack:
                 height = int(h * y_factor)
                 boxes.append([left, top, width, height])
                 scores.append(max_score)
+                
         indices = cv2.dnn.NMSBoxes(boxes, scores, confidence_thres, iou_thres)
         new_boxes = [boxes[i] for i in indices]
-        return new_boxes if len(new_boxes) == 5 else False
+        return new_boxes if len(new_boxes) == 5 else None
 
-    def siamese(self, small_img, boxes):
-        """使用Siamese网络匹配验证码中的文字"""
-        session = onnxruntime.InferenceSession("./onnx/siamese.onnx")
+    def siamese(self, small_img: str, boxes: List[List[int]]) -> List[Tuple[int, int]]:
+        """
+        使用Siamese网络匹配验证码中的文字
+        
+        Args:
+            small_img: 小图的Base64编码字符串
+            boxes: 从大图中检测到的边界框列表
+            
+        Returns:
+            匹配成功的位置坐标列表
+        """
+        session = self.siamese_session
         positions = [165, 200, 231, 265]
         result_list = []
         raw_image2 = self.read_base64_image(small_img)
+        
         for x in positions:
             if len(result_list) == 4:
                 break
@@ -64,6 +98,7 @@ class Crack:
             image_data_2 = np.array(img2) / 255.0
             image_data_2 = np.transpose(image_data_2, (2, 0, 1))
             image_data_2 = np.expand_dims(image_data_2, axis=0).astype(np.float32)
+            
             for box in boxes:
                 raw_image1 = self.big_img[box[1]:box[1]+box[3]+2, box[0]:box[0]+box[2]+2]
                 img1 = cv2.cvtColor(raw_image1, cv2.COLOR_BGR2RGB)
@@ -74,7 +109,9 @@ class Crack:
                 inputs = {'input': image_data_1, "input.53": image_data_2}
                 output = session.run(None, inputs)
                 output_sigmoid = 1 / (1 + np.exp(-output[0]))
+                
                 if output_sigmoid[0][0] >= 0.7:
-                    result_list.append([box[0], box[1]])
+                    result_list.append((box[0], box[1]))
                     break
+                    
         return result_list

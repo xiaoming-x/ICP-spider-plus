@@ -2,9 +2,23 @@ import argparse
 import time
 import random
 import sys
+import logging
+from typing import List, Optional, Dict, Any
 from curl_cffi import requests as cffi_requests
 from auth import AuthManager
-from utils import *
+from utils import (
+    generate_modern_headers, process_response, write_to_excel,
+    load_proxies, validate_proxies, format_proxy, retry
+)
+from constants import QUERY_URL, TYPE_MAPPING, DEFAULT_TIMEOUT
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger(__name__)
 
 
 def main():
@@ -12,46 +26,45 @@ def main():
     parser.add_argument('unit_name', nargs='?', help='查询单位名称')
     parser.add_argument('-f', '--file', help='批量查询文件')
     parser.add_argument('-o', '--output', help='输出文件名')
-    parser.add_argument('-t', '--type', choices=['web', 'app', 'miniapp', 'all'], default='web', help='查询类型')
-    parser.add_argument('-p', '--proxy_rotate', type=int, help='代理轮换间隔')
+    parser.add_argument('-t', '--type', choices=['web', 'app', 'miniapp', 'quickapp', 'all'], default='web', help='查询类型:网站、APP、小程序、快应用、全部')
+    parser.add_argument('-p', '--proxy_rotate', type=int, help='代理轮换间隔（每个代理处理N个请求后切换）')
     args = parser.parse_args()
 
     auth_manager = AuthManager()
     raw_proxies = load_proxies()
-    available_proxies = validate_proxies(raw_proxies)  # 新增代理验证函数
+    available_proxies = validate_proxies(raw_proxies)
     use_proxy = len(available_proxies) > 0
-
-    proxy_index = request_count = 0
-    last_proxy_used = None
-    query_types = ["web", "app", "miniapp"] if args.type == "all" else [args.type]
+    proxy_index = 0  # 代理索引，用于轮询
+    requests_per_proxy = 0  # 当前代理已处理的请求数
+    
+    query_types = ["web", "app", "miniapp", "quickapp"] if args.type == "all" else [args.type]
     units = load_units(args)
     
-    all_results = {t: [] for t in query_types}
+    all_results: Dict[str, List[Dict[str, Any]]] = {t: [] for t in query_types}
     blocked = False
 
     try:
         for unit_idx, unit in enumerate(units):
-            print(f"\n查询进度：{unit_idx+1}/{len(units)} - {unit}")
+            logger.info(f"\n查询进度：{unit_idx+1}/{len(units)} - {unit}")
             
-            # 代理切换逻辑（仅在启用代理轮换时执行）
-            if use_proxy and available_proxies and args.proxy_rotate:
-                if request_count % args.proxy_rotate == 0:
+            # 确定当前使用的代理
+            current_proxy: Optional[str] = None
+            if use_proxy and available_proxies:
+                # 检查是否需要轮换代理
+                if args.proxy_rotate and requests_per_proxy >= args.proxy_rotate:
                     proxy_index = (proxy_index + 1) % len(available_proxies)
-                current_proxy = available_proxies[proxy_index]
+                    requests_per_proxy = 0  # 重置计数
+                    logger.info(f"达到轮换间隔，切换到代理 #{proxy_index + 1}")
                 
-                # 打印代理信息（如果代理发生变化）
-                if current_proxy != last_proxy_used:
-                    print(f"使用代理：{current_proxy}")
-                    last_proxy_used = current_proxy
-            else:
-                current_proxy = None  # 未启用代理轮换时，不使用代理
+                current_proxy = available_proxies[proxy_index]
+                logger.info(f"当前使用代理：{current_proxy} (已处理 {requests_per_proxy}/{args.proxy_rotate or '无限'} 个请求)")
 
             for query_type in query_types:
                 if blocked:
                     break
                 
                 service_type = TYPE_MAPPING[query_type]
-                print(f"正在查询 {query_type} 类型...")
+                logger.info(f"正在查询 {query_type} 类型...")
                 success = False
 
                 while not success:
@@ -60,109 +73,92 @@ def main():
                     try:
                         # 发送请求
                         response = cffi_requests.post(
-                            "https://hlwicpfwc.miit.gov.cn/icpproject_query/api/icpAbbreviateInfo/queryByCondition",
+                            QUERY_URL,
                             headers=headers,
-                            json={"pageNum": "", "pageSize": "", "unitName": unit, "serviceType": service_type},
+                            json={"pageNum": "1", "pageSize": "100", "unitName": unit, "serviceType": service_type},
                             impersonate="chrome110",
                             proxies=format_proxy(current_proxy) if current_proxy else None,
-                            timeout=15
+                            timeout=DEFAULT_TIMEOUT
                         )
-                        request_count += 1
+                        
+                        # 增加当前代理的请求计数
+                        if current_proxy:
+                            requests_per_proxy += 1
 
                         # 403 处理逻辑
                         if response.status_code == 403:
-                            if not current_proxy:
-                                print("\n⚠️ 访问被拒绝（403），可能触发防护机制")
-                                sys.exit(1)
+                            logger.warning(f"代理 {current_proxy} 返回403，尝试切换代理...")
+                            if available_proxies and len(available_proxies) > 1:
+                                # 立即切换到下一个代理
+                                proxy_index = (proxy_index + 1) % len(available_proxies)
+                                current_proxy = available_proxies[proxy_index]
+                                requests_per_proxy = 0  # 重置计数
+                                logger.info(f"已切换到新代理：{current_proxy}")
+                                continue
                             else:
-                                print(f"代理 {current_proxy} 返回403，继续尝试其他代理...")
-                                available_proxies.remove(current_proxy)
-                                if available_proxies:
-                                    proxy_index = proxy_index % len(available_proxies)
-                                    current_proxy = available_proxies[proxy_index]
-                                    print(f"切换到新代理：{current_proxy}")
-                                    continue
-                                else:
-                                    print("所有代理均已失效，正在保存数据并退出...")
-                                    sys.exit(1)
+                                logger.error("无其他代理可用，退出程序")
+                                sys.exit(1)
 
                         # 处理响应数据
                         if response.status_code == 200:
                             response_data = response.json()
                             if response_data.get("code") == 401:
                                 auth_manager.update_headers()
-                                print("Token已更新，正在重试...")
+                                logger.info("Token已更新，正在重试...")
                                 continue
                             
                             if response_data.get("success"):
-                                all_results[query_type].extend(process_response(response_data, service_type))
+                                all_results[query_type].extend(
+                                    process_response(response_data, service_type, headers)
+                                )
                                 success = True
                                 # 智能延时
-                                # 有足够代理的情况下批量查询时可以适当拉长延时random.uniform(0.5, 1.5)，避免代理被封完
-                                delay = random.uniform(3, 4) if not current_proxy else random.uniform(0.5, 1.5)
+                                delay = random.uniform(3, 4) if not current_proxy else random.uniform(2, 3)
                                 time.sleep(delay)
-                                print(f"请求成功，随机延迟: {delay:.2f}秒")
+                                logger.info(f"请求成功，随机延迟: {delay:.2f}秒")
                             else:
                                 raise Exception(f"API返回错误：{response_data.get('msg')}")
                         else:
                             raise Exception(f"HTTP错误代码：{response.status_code}")
 
                     except Exception as e:
-                        print(f"请求失败：{str(e)}")
-                        if current_proxy:
-                            if current_proxy in available_proxies:
-                                available_proxies.remove(current_proxy)
-                                print(f"移除失效代理：{current_proxy}")
-                            if available_proxies:
-                                proxy_index = proxy_index % len(available_proxies)
-                                current_proxy = available_proxies[proxy_index]
-                                print(f"切换到新代理：{current_proxy}")
-                                continue
-                            else:
-                                print("所有代理均已失效，正在保存数据并退出...")
-                                sys.exit(1)
+                        logger.error(f"请求失败：{str(e)}")
+                        if current_proxy and available_proxies:
+                            # 切换到下一个代理
+                            proxy_index = (proxy_index + 1) % len(available_proxies)
+                            current_proxy = available_proxies[proxy_index]
+                            requests_per_proxy = 0  # 重置计数
+                            logger.info(f"切换到新代理：{current_proxy}")
+                            continue
                         else:
-                            print("未使用代理，请求失败，正在保存数据并退出...")
+                            logger.error("无可用代理，退出程序")
                             sys.exit(1)
 
                 if not success:
-                    print(f"{query_type} 类型查询失败")
+                    logger.warning(f"{query_type} 类型查询失败")
                     
     except KeyboardInterrupt:
-        print("\n操作中断，正在保存数据...")
+        logger.info("\n操作中断，正在保存数据...")
     finally:
         write_to_excel(all_results, args.output)
 
 
-
-def format_proxy(proxy_str):
-    """格式化代理地址，自动识别代理类型"""
-    if proxy_str.startswith("socks5://"):
-        return {"http": proxy_str, "https": proxy_str}
-    elif proxy_str.startswith("http://"):
-        return {"http": proxy_str, "https": proxy_str}
-    return proxy_str
-
-
-def validate_proxies(proxies):
-    """简单验证代理格式有效性"""
-    valid_proxies = []
-    for p in proxies:
-        if p.startswith(("http://", "https://", "socks5://")):
-            valid_proxies.append(p)
-        else:
-            print(f"忽略无效代理格式：{p}")
-    return valid_proxies
-
-
-def load_units(args):
+def load_units(args) -> List[str]:
     """加载查询单位列表"""
     if args.file:
-        with open(args.file, 'r', encoding='utf-8') as f:
-            return [line.strip() for line in f if line.strip()]
+        try:
+            with open(args.file, 'r', encoding='utf-8') as f:
+                units = [line.strip() for line in f if line.strip()]
+                logger.info(f"从文件加载 {len(units)} 个查询单位")
+                return units
+        except Exception as e:
+            logger.error(f"加载文件失败: {str(e)}")
+            sys.exit(1)
     elif args.unit_name:
         return [args.unit_name]
-    return []
+    else:
+        logger.error("请指定查询单位名称或批量查询文件")
+        sys.exit(1)
 
 
 if __name__ == '__main__':

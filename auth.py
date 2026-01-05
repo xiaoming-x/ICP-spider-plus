@@ -4,19 +4,32 @@ import time
 import hashlib
 import json
 import base64
+import logging
+from typing import Optional, Dict
 from urllib import parse
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 from captcha import Crack
+from utils import retry
+from constants import (
+    AUTH_URL, CAPTCHA_IMAGE_URL, CAPTCHA_CHECK_URL,
+    MAX_AUTH_RETRIES, MAX_TOKEN_RETRIES, USER_AGENTS
+)
+
+logger = logging.getLogger(__name__)
 
 
 class AuthManager:
     def __init__(self):
         self.crack = Crack()
+        self.token: Optional[str] = None
+        self.sign: Optional[str] = None
+        self.uuid_token: Optional[str] = None
+        self.cookie: Optional[str] = None
         self._reset_auth()  # 初始化认证信息
 
-    def _reset_auth(self):
-        """重置所有认证信息"""
+    def _reset_auth(self) -> None:
+        """重置所有认证信息并重新初始化"""
         self.token = None
         self.sign = None
         self.uuid_token = None
@@ -25,48 +38,58 @@ class AuthManager:
         self._process_captcha()    # 处理验证码
         self._generate_cookie()    # 生成Cookie
 
-    def _generate_cookie(self):
+    def _generate_cookie(self) -> None:
+        """生成随机Cookie"""
         self.cookie = f"__jsluid_s={uuid.uuid4().hex[:32]}"
 
-    def _get_auth_token(self):
-        for retry in range(10):
-            try:
-                t = str(round(time.time()))
-                data = {
-                    "authKey": hashlib.md5(("testtest" + t).encode()).hexdigest(),
-                    "timeStamp": t
-                }
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                    "Referer": "https://beian.miit.gov.cn/",
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Connection": "keep-alive",
-                    "Accept": "application/json, text/plain, */*",
-                    "Accept-Encoding": "gzip, deflate, br",
-                    "Accept-Language": "zh-CN,zh;q=0.9",
-                    "Origin": "https://beian.miit.gov.cn"
-                }
-                resp = requests.post(
-                    "https://hlwicpfwc.miit.gov.cn/icpproject_query/api/auth",
-                    headers=headers,
-                    data=parse.urlencode(data),
-                    timeout=10
-                )
-                if resp.status_code != 200:
-                    raise Exception(f"HTTP {resp.status_code} 错误")
-                json_data = resp.json()
-                if "params" not in json_data or "bussiness" not in json_data["params"]:
-                    raise Exception("响应格式异常")
-                self.token = json_data["params"]["bussiness"]
-                print("Token获取成功:", self.token[:10]+"..."+self.token[-10:])
-                return
-            except Exception as e:
-                print(f"获取Token失败（第{retry+1}次重试）: {str(e)}")
-                if retry == 2:
-                    raise RuntimeError("无法获取Token，请检查网络或参数")
-                time.sleep(2 if retry == 0 else 5)
+    @retry(max_retries=MAX_TOKEN_RETRIES, initial_delay=2, backoff_factor=1.5)
+    def _get_auth_token(self) -> None:
+        """获取认证Token"""
+        t = str(round(time.time()))
+        data = {
+            "authKey": hashlib.md5(("testtest" + t).encode()).hexdigest(),
+            "timeStamp": t
+        }
+        
+        headers = {
+            "User-Agent": USER_AGENTS[0],
+            "Referer": "https://beian.miit.gov.cn/",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Connection": "keep-alive",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Origin": "https://beian.miit.gov.cn"
+        }
+        
+        resp = requests.post(
+            AUTH_URL,
+            headers=headers,
+            data=parse.urlencode(data),
+            timeout=10
+        )
+        
+        if resp.status_code != 200:
+            raise Exception(f"HTTP {resp.status_code} 错误")
+            
+        json_data = resp.json()
+        if "params" not in json_data or "bussiness" not in json_data["params"]:
+            raise Exception("响应格式异常")
+            
+        self.token = json_data["params"]["bussiness"]
+        logger.info(f"Token获取成功: {self.token[:10]}...{self.token[-10:]}")
 
-    def aes_ecb_encrypt(self, plaintext, key):
+    def aes_ecb_encrypt(self, plaintext: bytes, key: str) -> str:
+        """
+        使用AES-ECB模式加密明文
+        
+        Args:
+            plaintext: 待加密的字节数据
+            key: 加密密钥（字符串）
+            
+        Returns:
+            加密后的Base64编码字符串
+        """
         backend = default_backend()
         cipher = Cipher(algorithms.AES(key.encode()), modes.ECB(), backend=backend)
         padding_length = 16 - (len(plaintext) % 16)
@@ -75,90 +98,98 @@ class AuthManager:
         ciphertext = encryptor.update(plaintext_padded) + encryptor.finalize()
         return base64.b64encode(ciphertext).decode('utf-8')
 
-    def _process_captcha(self):
-        for retry in range(3):
-            try:
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                    "Referer": "https://beian.miit.gov.cn/",
-                    "Token": self.token,
-                    "Connection": "keep-alive",
-                    "Accept": "application/json, text/plain, */*",
-                    "Accept-Encoding": "gzip, deflate, br",
-                    "Accept-Language": "zh-CN,zh;q=0.9",
-                    "Origin": "https://beian.miit.gov.cn"
-                }
-                client_uid = f"point-{uuid.uuid4()}"
-                resp = requests.post(
-                    "https://hlwicpfwc.miit.gov.cn/icpproject_query/api/image/getCheckImagePoint",
-                    headers=headers,
-                    json={"clientUid": client_uid},
-                    timeout=10
-                )
-                if resp.status_code != 200:
-                    raise Exception(f"验证码获取失败 HTTP {resp.status_code}")
-                params = resp.json()["params"]
-                boxes = self.crack.detect(params["bigImage"])
-                if not boxes or len(boxes) != 5:
-                    raise Exception("文字检测失败，获取到{}个框".format(len(boxes)))
-                points = self.crack.siamese(params["smallImage"], boxes)
-                if len(points) != 4:
-                    raise Exception("文字匹配失败，匹配到{}个点".format(len(points)))
-                new_points = [[p[0] + 20, p[1] + 20] for p in points]
-                point_json = json.dumps([{"x": p[0], "y": p[1]} for p in new_points])
-                enc_point = self.aes_ecb_encrypt(
-                    plaintext=point_json.replace(" ", "").encode(),
-                    key=params["secretKey"]
-                )
-                check_resp = requests.post(
-                    "https://hlwicpfwc.miit.gov.cn/icpproject_query/api/image/checkImage",
-                    headers=headers,
-                    json={
-                        "token": params["uuid"],
-                        "secretKey": params["secretKey"],
-                        "clientUid": client_uid,
-                        "pointJson": enc_point
-                    },
-                    timeout=10
-                )
-                if check_resp.status_code != 200:
-                    raise Exception(f"验证码验证失败 HTTP {check_resp.status_code}")
-                check_data = check_resp.json()
-                if check_data["code"] != 200:
-                    raise Exception(f"验证码验证失败: {check_data.get('msg', '未知错误')}")
-                self.sign = check_data["params"]["sign"]
-                self.uuid_token = params["uuid"]
-                print("验证码验证成功，开始获取ICP备案信息")
-                return
-            except Exception as e:
-                print(f"验证码处理失败（第{retry+1}次重试）: {str(e)}")
-                if retry == 2:
-                    raise RuntimeError("验证码处理失败")
-                time.sleep(2 if retry == 0 else 5)
-                self._get_auth_token()
+    @retry(max_retries=MAX_AUTH_RETRIES, initial_delay=2, backoff_factor=2)
+    def _process_captcha(self) -> None:
+        """处理验证码并完成验证"""
+        if not self.token:
+            raise ValueError("Token未初始化，无法处理验证码")
+            
+        headers = {
+            "User-Agent": USER_AGENTS[0],
+            "Referer": "https://beian.miit.gov.cn/",
+            "Token": self.token,
+            "Connection": "keep-alive",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Origin": "https://beian.miit.gov.cn"
+        }
+        
+        client_uid = f"point-{uuid.uuid4()}"
+        resp = requests.post(
+            CAPTCHA_IMAGE_URL,
+            headers=headers,
+            json={"clientUid": client_uid},
+            timeout=10
+        )
+        
+        if resp.status_code != 200:
+            raise Exception(f"验证码获取失败 HTTP {resp.status_code}")
+            
+        params = resp.json()["params"]
+        boxes = self.crack.detect(params["bigImage"])
+        
+        if not boxes or len(boxes) != 5:
+            raise Exception(f"文字检测失败，获取到{len(boxes)}个框")
+            
+        points = self.crack.siamese(params["smallImage"], boxes)
+        if len(points) != 4:
+            raise Exception(f"文字匹配失败，匹配到{len(points)}个点")
+            
+        new_points = [[p[0] + 20, p[1] + 20] for p in points]
+        point_json = json.dumps([{"x": p[0], "y": p[1]} for p in new_points])
+        enc_point = self.aes_ecb_encrypt(
+            plaintext=point_json.replace(" ", "").encode(),
+            key=params["secretKey"]
+        )
+        
+        check_resp = requests.post(
+            CAPTCHA_CHECK_URL,
+            headers=headers,
+            json={
+                "token": params["uuid"],
+                "secretKey": params["secretKey"],
+                "clientUid": client_uid,
+                "pointJson": enc_point
+            },
+            timeout=10
+        )
+        
+        if check_resp.status_code != 200:
+            raise Exception(f"验证码验证失败 HTTP {check_resp.status_code}")
+            
+        check_data = check_resp.json()
+        if check_data["code"] != 200:
+            raise Exception(f"验证码验证失败: {check_data.get('msg', '未知错误')}")
+            
+        self.sign = check_data["params"]["sign"]
+        self.uuid_token = params["uuid"]
+        logger.info("验证码验证成功，开始获取ICP备案信息")
 
-    def update_headers(self):
-        """更新认证信息（10次重试）"""
+    def update_headers(self) -> None:
+        """更新认证信息（带重试机制）"""
         max_retries = 10
         for attempt in range(1, max_retries + 1):
             try:
-                print(f"\n▶ 认证尝试 {attempt}/{max_retries}")
+                logger.info(f"\n▶ 认证尝试 {attempt}/{max_retries}")
                 self._reset_auth()
-                print("✅ 认证成功")
+                logger.info("✅ 认证成功")
                 return
             except Exception as e:
-                print(f"❌ 失败原因: {str(e)}")
+                logger.error(f"❌ 失败原因: {str(e)}")
                 if attempt < max_retries:
                     delay = random.randint(5, 10)
-                    print(f"⏳ {delay}秒后重试...")
+                    logger.info(f"⏳ {delay}秒后重试...")
                     time.sleep(delay)
+                    
         raise RuntimeError("❗ 无法完成认证，请检查：\n1. 网络连接\n2. 验证码识别服务\n3. 目标网站状态")
 
     @property
-    def headers(self):
+    def headers(self) -> Dict[str, str]:
+        """获取当前认证头信息"""
         return {
-            "Token": self.token,
-            "Sign": self.sign,
-            "Uuid": self.uuid_token,
-            "Cookie": self.cookie
+            "Token": self.token or "",
+            "Sign": self.sign or "",
+            "Uuid": self.uuid_token or "",
+            "Cookie": self.cookie or ""
         }
