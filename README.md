@@ -76,6 +76,7 @@ options:
    ![image-20260105161509324](./README/image-20260105161509324.png)
 
 4. **查询多个公司(代理)**
+   >代理地址写入proxy.txt
 
    ```
    python main.py -f Company.txt -t all -p 3
