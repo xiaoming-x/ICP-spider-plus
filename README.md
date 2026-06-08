@@ -81,8 +81,6 @@ options:
    python main.py -f Company.txt -t all -p 3
    ```
 
-   ![image-20260105165954142](./README/image-20260105165954142.png)
-
 
 查询结果：
 
