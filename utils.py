@@ -9,6 +9,39 @@ from constants import DETAIL_QUERY_URL, TYPE_MAPPING, PROXY_TEST_URL, DEFAULT_TI
 
 logger = logging.getLogger(__name__)
 
+# 生成浏览器 UA 头的辅助常量（与 generate_modern_headers 保持一致，避免循环引用）
+_USER_AGENT_TMPL = (
+    "Mozilla/5.0 ({platform}) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/{version}.0.0.0 Safari/537.36"
+)
+_PLATFORM_MAP = {"Windows": "Windows NT 10.0; Win64; x64", "macOS": "Macintosh; Intel Mac OS X 10_15_7"}
+
+
+def _make_browser_headers(auth_headers: Dict[str, str]) -> Dict[str, str]:
+    """生成现代浏览器请求头（与 generate_modern_headers 逻辑一致）"""
+    browser_version = random.choice(["124", "123", "122"])
+    platform = random.choice(["Windows", "macOS"])
+    return {
+        "Host": "hlwicpfwc.miit.gov.cn",
+        "Sec-Ch-Ua": (
+            f"\"Chromium\";v=\"{browser_version}\", "
+            f"\"Google Chrome\";v=\"{browser_version}\", "
+            f"\"Not-A.Brand\";v=\"99\""
+        ),
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": f"\"{platform}\"",
+        "User-Agent": _USER_AGENT_TMPL.format(
+            platform=_PLATFORM_MAP.get(platform, platform),
+            version=browser_version,
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "Referer": "https://beian.miit.gov.cn/",
+        "Origin": "https://beian.miit.gov.cn",
+        **auth_headers,
+    }
+
 
 def retry(max_retries: int, initial_delay: float = 2, backoff_factor: float = 2):
     """通用重试装饰器"""
@@ -57,7 +90,8 @@ def generate_modern_headers(auth_headers: Dict[str, str]) -> Dict[str, str]:
 def process_response(response_data: Dict[str, Any], service_type: int, headers: Dict[str, str], 
                      current_proxy: Optional[str] = None, available_proxies: Optional[List[str]] = None,
                      proxy_index_ref: Optional[list] = None, proxy_rotate: Optional[int] = None,
-                     requests_per_proxy_ref: Optional[list] = None) -> List[Dict[str, Any]]:
+                     requests_per_proxy_ref: Optional[list] = None,
+                     auth_manager: Any = None) -> List[Dict[str, Any]]:
     """处理API响应数据，提取备案信息"""
     results = []
     if response_data.get("success"):
@@ -74,14 +108,16 @@ def process_response(response_data: Dict[str, Any], service_type: int, headers: 
             if service_type in [6, 7, 8]:  # 6=app, 7=miniapp, 8=quickapp
                 data_id = item.get("dataId")
                 if data_id:
-                    # 详情查询重试机制（支持代理轮换）
+                    # 详情查询重试机制（支持代理轮换 + token 过期自动刷新）
                     detail_success = False
                     detail_proxy = current_proxy  # 使用传入的代理
                     detail_proxy_index = proxy_index_ref[0] if proxy_index_ref else 0
                     detail_requests_count = requests_per_proxy_ref[0] if requests_per_proxy_ref else 0
                     detail_retry = 0
                     use_proxy_for_detail = available_proxies is not None and len(available_proxies) > 0
-                    
+                    # token 是否已刷新过（避免反复刷新还失败时无限循环）
+                    token_refreshed = False
+
                     # 使用代理时无限重试，未使用代理时有限重试
                     max_detail_retries = float('inf') if use_proxy_for_detail else MAX_DETAIL_QUERY_RETRIES
                     
@@ -118,6 +154,32 @@ def process_response(response_data: Dict[str, Any], service_type: int, headers: 
                             
                             if detail_resp.status_code == 200:
                                 detail_data = detail_resp.json()
+                                # HTTP 200 但 code=401（token 过期）
+                                if detail_data.get("code") == 401:
+                                    if auth_manager and not token_refreshed:
+                                        logger.warning(f"详情查询 token 过期 (dataId={data_id}, code=401)，正在刷新认证...")
+                                        try:
+                                            auth_manager.update_headers()
+                                            headers.update(_make_browser_headers(auth_manager.headers))
+                                            token_refreshed = True
+                                            detail_retry = 0
+                                            detail_requests_count = 0
+                                            if requests_per_proxy_ref:
+                                                requests_per_proxy_ref[0] = detail_requests_count
+                                            logger.info("认证已刷新，继续重试...")
+                                            time.sleep(random.uniform(1, 2))
+                                            continue
+                                        except Exception as refresh_err:
+                                            logger.error(f"刷新认证失败: {refresh_err}")
+                                            token_refreshed = True
+                                    if detail_retry < max_detail_retries:
+                                        logger.warning(f"详情查询 code=401 (dataId={data_id}, 第{detail_retry}次)，正在重试...")
+                                        time.sleep(random.uniform(1, 2))
+                                        continue
+                                    else:
+                                        logger.warning(f"详情查询 code=401 (dataId={data_id}, 已重试{detail_retry}次)")
+                                        break
+                                
                                 if detail_data.get("success") and "params" in detail_data:
                                     detail = detail_data["params"]
                                     # 更新详情字段
@@ -127,6 +189,28 @@ def process_response(response_data: Dict[str, Any], service_type: int, headers: 
                                     break  # 成功，跳出重试循环
                                 else:
                                     error_msg = detail_data.get('msg', '未知错误')
+                                    
+                                    # ===== token 过期自动刷新 =====
+                                    if auth_manager and "token" in error_msg.lower() and not token_refreshed:
+                                        logger.warning(f"详情查询 token 过期 (dataId={data_id})，正在刷新认证...")
+                                        try:
+                                            auth_manager.update_headers()
+                                            # 用新认证信息重新生成请求头
+                                            headers.update(_make_browser_headers(auth_manager.headers))
+                                            token_refreshed = True
+                                            detail_retry = 0  # 重置重试计数，用新 token 重新尝试
+                                            # 重置代理计数（新 token 意味着新开始）
+                                            detail_requests_count = 0
+                                            if requests_per_proxy_ref:
+                                                requests_per_proxy_ref[0] = detail_requests_count
+                                            logger.info("认证已刷新，继续重试详情查询...")
+                                            time.sleep(random.uniform(1, 2))
+                                            continue
+                                        except Exception as refresh_err:
+                                            logger.error(f"刷新认证失败: {refresh_err}")
+                                            # 刷新失败也标记已尝试过，避免无限刷新
+                                            token_refreshed = True
+                                    
                                     if detail_retry < max_detail_retries:
                                         logger.warning(f"详情查询失败 (dataId={data_id}, 第{detail_retry}次): {error_msg}，正在重试...")
                                         time.sleep(random.uniform(1, 2))  # 短暂延迟后重试
@@ -224,12 +308,21 @@ def write_to_excel(results_dict: Dict[str, List[Dict]], output_file: Optional[st
 
 
 def load_proxies() -> List[str]:
-    """从proxy.txt加载代理列表"""
+    """从proxy.txt加载代理列表（自动去重）"""
     try:
         with open('proxy.txt', 'r') as f:
             proxies = [line.strip() for line in f if line.strip()]
-            logger.info(f"已加载 {len(proxies)} 个代理")
-            return proxies
+        # 去重且保持顺序
+        seen = set()
+        unique = []
+        for p in proxies:
+            if p not in seen:
+                seen.add(p)
+                unique.append(p)
+        if len(unique) != len(proxies):
+            logger.warning(f"代理列表有 {len(proxies) - len(unique)} 个重复项，已自动去重")
+        logger.info(f"已加载 {len(unique)} 个代理（去重前 {len(proxies)} 个）")
+        return unique
     except FileNotFoundError:
         logger.warning("未找到proxy.txt文件，不使用代理")
         return []

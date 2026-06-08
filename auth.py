@@ -1,26 +1,44 @@
-import requests
-import uuid
-import time
-import random
-import hashlib
-import json
+"""
+认证管理模块 — 处理工信部 ICP 备案查询接口的认证与滑块验证码
+
+从 icp-query-tool 的滑块验证码方案移植，替代原有的 YOLO+Siamese 点选方案。
+"""
+
 import base64
+import hashlib
 import logging
-from typing import Optional, Dict
-from urllib import parse
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
+import random
+import time
+import uuid
+from typing import Any, Dict, Optional
+
+import requests
+import urllib3
+from urllib3.exceptions import InsecureRequestWarning
+
 from captcha import Crack
-from utils import retry
 from constants import (
-    AUTH_URL, CAPTCHA_IMAGE_URL, CAPTCHA_CHECK_URL,
-    MAX_AUTH_RETRIES, MAX_TOKEN_RETRIES, MAX_CAPTCHA_RETRIES, USER_AGENTS
+    AUTH_URL,
+    CAPTCHA_IMAGE_URL,
+    CAPTCHA_CHECK_URL,
+    MAX_AUTH_RETRIES,
+    MAX_TOKEN_RETRIES,
+    MAX_CAPTCHA_RETRIES,
+    USER_AGENTS,
+    DEFAULT_TIMEOUT,
 )
+
+# 全局关闭未验证 HTTPS 请求的告警
+urllib3.disable_warnings(InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
 
 
 class AuthManager:
+    """认证管理器 — 处理工信部 ICP 接口的登录认证与滑块验证码"""
+
+    BASE_URL = "https://hlwicpfwc.miit.gov.cn/icpproject_query/api/"
+
     def __init__(self):
         self.crack = Crack()
         self.token: Optional[str] = None
@@ -35,76 +53,64 @@ class AuthManager:
         self.sign = None
         self.uuid_token = None
         self.cookie = None
-        self._get_auth_token()     # 获取Token
-        self._process_captcha()    # 处理验证码
-        self._generate_cookie()    # 生成Cookie
+        self._get_auth_token()     # 获取 Token
+        self._process_captcha()    # 处理滑块验证码
+        self._generate_cookie()    # 生成 Cookie
 
     def _generate_cookie(self) -> None:
-        """生成随机Cookie"""
+        """生成随机 Cookie"""
         self.cookie = f"__jsluid_s={uuid.uuid4().hex[:32]}"
 
-    @retry(max_retries=MAX_TOKEN_RETRIES, initial_delay=2, backoff_factor=1.5)
+    @staticmethod
+    def _auth_key(account: str, secret: str, ts_ms: int) -> str:
+        return hashlib.md5(
+            f"{account}{secret}{ts_ms}".encode("utf-8")
+        ).hexdigest()
+
     def _get_auth_token(self) -> None:
-        """获取认证Token"""
-        t = str(round(time.time()))
-        data = {
-            "authKey": hashlib.md5(("testtest" + t).encode()).hexdigest(),
-            "timeStamp": t
+        """获取认证 Token（与 icp-query-tool 一致，使用 requests）"""
+        ts_ms = int(time.time() * 1000)
+        payload = {
+            "authKey": self._auth_key("test", "test", ts_ms),
+            "timeStamp": ts_ms,
         }
-        
-        headers = {
-            "User-Agent": USER_AGENTS[0],
-            "Referer": "https://beian.miit.gov.cn/",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Connection": "keep-alive",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-            "Origin": "https://beian.miit.gov.cn"
-        }
-        
+
+        # 同 icp-query-tool 的 auth 方法：使用 urlencoded 格式
         resp = requests.post(
             AUTH_URL,
-            headers=headers,
-            data=parse.urlencode(data),
-            timeout=10
+            data=payload,
+            headers={
+                "User-Agent": USER_AGENTS[0],
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": "https://beian.miit.gov.cn",
+                "Referer": "https://beian.miit.gov.cn/",
+                "Accept": "application/json, text/plain, */*",
+            },
+            timeout=DEFAULT_TIMEOUT,
+            verify=False,
         )
-        
-        if resp.status_code != 200:
-            raise Exception(f"HTTP {resp.status_code} 错误")
-            
-        json_data = resp.json()
-        if "params" not in json_data or "bussiness" not in json_data["params"]:
-            raise Exception("响应格式异常")
-            
-        self.token = json_data["params"]["bussiness"]
-        logger.info(f"Token获取成功: {self.token[:10]}...{self.token[-10:]}")
+        if resp.status_code == 403:
+            raise RuntimeError(
+                "HTTP 403 Forbidden: auth 被风控拦截，请稍后重试或更换网络出口"
+            )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 200:
+            raise RuntimeError(f"auth failed: {data}")
+        params = data.get("params") or {}
+        req_token = params.get("token") or params.get("bussiness")
+        if not req_token:
+            raise RuntimeError(f"auth response missing token: {data}")
+        self.token = req_token
+        logger.info(
+            f"Token 获取成功: {self.token[:10]}...{self.token[-10:]}"
+        )
 
-    def aes_ecb_encrypt(self, plaintext: bytes, key: str) -> str:
-        """
-        使用AES-ECB模式加密明文
-        
-        Args:
-            plaintext: 待加密的字节数据
-            key: 加密密钥（字符串）
-            
-        Returns:
-            加密后的Base64编码字符串
-        """
-        backend = default_backend()
-        cipher = Cipher(algorithms.AES(key.encode()), modes.ECB(), backend=backend)
-        padding_length = 16 - (len(plaintext) % 16)
-        plaintext_padded = plaintext + bytes([padding_length]) * padding_length
-        encryptor = cipher.encryptor()
-        ciphertext = encryptor.update(plaintext_padded) + encryptor.finalize()
-        return base64.b64encode(ciphertext).decode('utf-8')
-
-    @retry(max_retries=MAX_AUTH_RETRIES, initial_delay=2, backoff_factor=2)
     def _process_captcha(self) -> None:
-        """处理验证码并完成验证（带内层重试机制）"""
+        """处理滑块验证码（从 icp-query-tool 移植，带重试机制）"""
         if not self.token:
-            raise ValueError("Token未初始化，无法处理验证码")
-        
+            raise ValueError("Token 未初始化，无法处理验证码")
+
         # 内层重试：验证码识别失败时自动重新获取验证码
         for captcha_attempt in range(1, MAX_CAPTCHA_RETRIES + 1):
             try:
@@ -116,83 +122,97 @@ class AuthManager:
                     "Accept": "application/json, text/plain, */*",
                     "Accept-Encoding": "gzip, deflate, br",
                     "Accept-Language": "zh-CN,zh;q=0.9",
-                    "Origin": "https://beian.miit.gov.cn"
+                    "Origin": "https://beian.miit.gov.cn",
                 }
-                
+
                 client_uid = f"point-{uuid.uuid4()}"
                 resp = requests.post(
                     CAPTCHA_IMAGE_URL,
                     headers=headers,
                     json={"clientUid": client_uid},
-                    timeout=10
+                    timeout=DEFAULT_TIMEOUT,
+                    verify=False,
                 )
-                
                 if resp.status_code != 200:
-                    raise Exception(f"验证码获取失败 HTTP {resp.status_code}")
-                    
-                params = resp.json()["params"]
-                boxes = self.crack.detect(params["bigImage"])
-                
-                # 修复：先检查是否为None，再检查长度
-                if boxes is None:
-                    raise Exception("文字检测失败，未检测到任何文字框")
-                if len(boxes) != 5:
-                    raise Exception(f"文字检测失败，期望5个框，实际检测到{len(boxes)}个框")
-                    
-                points = self.crack.siamese(params["smallImage"], boxes)
-                if len(points) != 4:
-                    raise Exception(f"文字匹配失败，期望4个匹配点，实际匹配到{len(points)}个点")
-                    
-                new_points = [[p[0] + 20, p[1] + 20] for p in points]
-                point_json = json.dumps([{"x": p[0], "y": p[1]} for p in new_points])
-                enc_point = self.aes_ecb_encrypt(
-                    plaintext=point_json.replace(" ", "").encode(),
-                    key=params["secretKey"]
-                )
-                
+                    raise Exception(
+                        f"验证码获取失败 HTTP {resp.status_code}"
+                    )
+
+                data = resp.json()
+                params = data.get("params") or {}
+                big_b64 = params.get("bigImage")
+                small_b64 = params.get("smallImage")
+                if not big_b64 or not small_b64:
+                    raise Exception(
+                        f"验证码图片数据缺失: {list(params.keys())}"
+                    )
+
+                big_img = base64.b64decode(big_b64)
+                small_img = base64.b64decode(small_b64)
+                offset = self.crack.calc_offset(big_img, small_img)
+                self.uuid_token = params.get("uuid", "")
+
+                logger.debug(f"滑块偏移量: {offset}")
+
+                # 提交验证
                 check_resp = requests.post(
                     CAPTCHA_CHECK_URL,
                     headers=headers,
                     json={
-                        "token": params["uuid"],
-                        "secretKey": params["secretKey"],
-                        "clientUid": client_uid,
-                        "pointJson": enc_point
+                        "key": self.uuid_token,
+                        "value": str(offset),
                     },
-                    timeout=10
+                    timeout=DEFAULT_TIMEOUT,
+                    verify=False,
                 )
-                
                 if check_resp.status_code != 200:
-                    raise Exception(f"验证码验证失败 HTTP {check_resp.status_code}")
-                    
+                    raise Exception(
+                        f"验证码验证失败 HTTP {check_resp.status_code}"
+                    )
+
                 check_data = check_resp.json()
-                if check_data["code"] != 200:
-                    raise Exception(f"验证码验证失败: {check_data.get('msg', '未知错误')}")
-                    
-                # 成功：保存认证信息并返回
-                self.sign = check_data["params"]["sign"]
-                self.uuid_token = params["uuid"]
-                if captcha_attempt > 1:
-                    logger.info(f"验证码验证成功（第{captcha_attempt}次尝试）")
+                if not check_data.get("success"):
+                    raise Exception(
+                        f"验证码验证失败: {check_data.get('msg', '未知错误')}"
+                    )
+
+                # 成功：保存 sign
+                check_params = check_data.get("params")
+                if isinstance(check_params, dict):
+                    self.sign = check_params.get("sign", "")
                 else:
-                    logger.info("验证码验证成功，开始获取ICP备案信息")
+                    self.sign = check_params or ""
+                if not self.sign:
+                    raise Exception(
+                        f"验证码验证成功但 sign 缺失: {check_data}"
+                    )
+
+                if captcha_attempt > 1:
+                    logger.info(
+                        f"滑块验证码验证成功（第{captcha_attempt}次尝试）"
+                    )
+                else:
+                    logger.info("滑块验证码验证成功，开始查询 ICP 备案信息")
                 return
-                
+
             except Exception as e:
                 error_msg = str(e)
-                # 如果是验证码识别失败（检测或匹配失败），尝试重新获取验证码
-                if "文字检测失败" in error_msg or "文字匹配失败" in error_msg:
-                    if captcha_attempt < MAX_CAPTCHA_RETRIES:
-                        logger.warning(f"验证码识别失败（第{captcha_attempt}次尝试）: {error_msg}，正在重新获取验证码...")
-                        time.sleep(1)  # 短暂延迟后重试
-                        continue
-                    else:
-                        # 达到最大重试次数，抛出异常让外层重试机制处理
-                        logger.error(f"验证码识别连续失败{MAX_CAPTCHA_RETRIES}次: {error_msg}")
-                        raise Exception(f"验证码识别失败（已重试{MAX_CAPTCHA_RETRIES}次）: {error_msg}")
+                if captcha_attempt < MAX_CAPTCHA_RETRIES:
+                    logger.warning(
+                        f"滑块验证码识别失败（第{captcha_attempt}次尝试）: "
+                        f"{error_msg}，正在重新获取验证码..."
+                    )
+                    time.sleep(1)
+                    continue
                 else:
-                    # 其他错误（如网络错误、API错误），直接抛出
-                    raise
+                    logger.error(
+                        f"滑块验证码连续失败{MAX_CAPTCHA_RETRIES}次: "
+                        f"{error_msg}"
+                    )
+                    raise Exception(
+                        f"滑块验证码识别失败（已重试{MAX_CAPTCHA_RETRIES}次）: "
+                        f"{error_msg}"
+                    )
 
     def update_headers(self) -> None:
         """更新认证信息（带重试机制）"""
@@ -209,8 +229,10 @@ class AuthManager:
                     delay = random.randint(5, 10)
                     logger.info(f"⏳ {delay}秒后重试...")
                     time.sleep(delay)
-                    
-        raise RuntimeError("❗ 无法完成认证，请检查：\n1. 网络连接\n2. 验证码识别服务\n3. 目标网站状态")
+
+        raise RuntimeError(
+            "❗ 无法完成认证，请检查：\n1. 网络连接\n2. 验证码识别服务\n3. 目标网站状态"
+        )
 
     @property
     def headers(self) -> Dict[str, str]:
@@ -219,5 +241,71 @@ class AuthManager:
             "Token": self.token or "",
             "Sign": self.sign or "",
             "Uuid": self.uuid_token or "",
-            "Cookie": self.cookie or ""
+            "Cookie": self.cookie or "",
         }
+
+    # ── 以下是向后兼容的辅助方法（供外部直接使用，类似 icp-query-tool 的 MiitIcpAutoClient） ──
+
+    def get_check_images(self, client_uid: str | None = None) -> dict[str, Any]:
+        """获取验证码图片（兼容 icp-query-tool 接口）"""
+        if not self.token:
+            self._get_auth_token()
+        if not client_uid:
+            client_uid = str(uuid.uuid4())
+        resp = requests.post(
+            CAPTCHA_IMAGE_URL,
+            json={"clientUid": client_uid},
+            headers={
+                "User-Agent": USER_AGENTS[0],
+                "Referer": "https://beian.miit.gov.cn/",
+                "Token": self.token,
+                "Accept": "application/json, text/plain, */*",
+                "Origin": "https://beian.miit.gov.cn",
+            },
+            timeout=DEFAULT_TIMEOUT,
+            verify=False,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        params = data.get("params") or {}
+        self.uuid_token = params.get("uuid", "")
+        if not self.uuid_token:
+            raise RuntimeError(f"getCheckImagePoint failed: {data}")
+        return data
+
+    def verify_slider(self, image_payload: dict[str, Any]) -> tuple[int, str]:
+        """验证滑块（兼容 icp-query-tool 接口）"""
+        params = image_payload.get("params") or {}
+        big_b64 = params.get("bigImage")
+        small_b64 = params.get("smallImage")
+        if not big_b64 or not small_b64:
+            raise RuntimeError(f"captcha image missing: {image_payload}")
+
+        big_img_bytes = base64.b64decode(big_b64)
+        small_img_bytes = base64.b64decode(small_b64)
+        offset = self.crack.calc_offset(big_img_bytes, small_img_bytes)
+
+        resp = requests.post(
+            CAPTCHA_CHECK_URL,
+            json={"key": self.uuid_token, "value": str(offset)},
+            headers={"Token": self.token},
+            timeout=DEFAULT_TIMEOUT,
+            verify=False,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("success"):
+            raise RuntimeError(
+                f"checkImage failed, offset={offset}, resp={data}"
+            )
+
+        params2 = data.get("params")
+        if isinstance(params2, dict):
+            self.sign = params2.get("sign", "")
+        else:
+            self.sign = params2 or ""
+        if not self.sign:
+            raise RuntimeError(
+                f"checkImage success but sign missing: {data}"
+            )
+        return offset, self.sign

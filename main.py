@@ -67,7 +67,6 @@ def main():
                 success = False
                 retry_count = 0
                 tried_proxies = set()  # 记录已尝试的代理索引（用于避免无限循环）
-                tried_proxies = set()  # 记录已尝试的代理索引（用于避免无限循环）
 
                 while not success:
                     # 使用代理时：在每次请求前检查是否需要轮换代理
@@ -130,7 +129,8 @@ def main():
                                         available_proxies=available_proxies if use_proxy else None,
                                         proxy_index_ref=proxy_index_ref,
                                         proxy_rotate=args.proxy_rotate if use_proxy else None,
-                                        requests_per_proxy_ref=requests_per_proxy_ref
+                                        requests_per_proxy_ref=requests_per_proxy_ref,
+                                        auth_manager=auth_manager,
                                     )
                                 )
                                 
