@@ -1,9 +1,10 @@
 # 自动化ICP备案信息批量查询
 
 验证码识别部分来源：
-https://github.com/ravizhan/ICP-spider
-
-引用该项目识别验证码+deepseek结合自己的脚本
+~~https://github.com/ravizhan/ICP-spider~~
+~~引用该项目识别验证码+deepseek结合自己的脚本~~
+https://github.com/yellowfliag1/icp-query-tool
+改用 ddddocr + OpenCV 掩码模板匹配（滑块验证码）
 
 ## 警告
 
@@ -25,7 +26,7 @@ https://github.com/ravizhan/ICP-spider
 
 ## 功能
 
-1. 单公司名称查询（不实用）
+1. 单公司名称查询
 2. 指定文件查询多个公司ICP备案信息
 3. 通过代理查询多个公司ICP备案信息
 5. 将查询结保存到本地文件中。
@@ -33,7 +34,6 @@ https://github.com/ravizhan/ICP-spider
 ## 依赖
 
 - Python 3.10/3.11
-- 换环境后python 3.14出现了No matching distribution found for onnxruntime的问题
 
 通过以下命令安装所需的库：
 
@@ -112,10 +112,11 @@ quickapp
 
 [ICP-spider](https://github.com/ravizhan/ICP-spider) ICP-spider
 
+[icp-query-tool](https://github.com/youranreus/icp-query-tool)
+
+[ddddocr](https://github.com/sml2h3/ddddocr)
 
 
 ## 开源协议
-
-
 
 依据上游项目 [ultralytics](https://github.com/ultralytics/ultralytics) 所使用的AGPLv3协议，现以相同协议开源本项目，请自觉遵守。
